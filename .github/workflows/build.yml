@@ -1,0 +1,252 @@
+name: Build APK
+on:
+  push:
+    paths-ignore:
+      - "README.md"
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+      - name: Create Android project
+        run: |
+          mkdir -p app/src/main/assets app/src/main/java/com/example/musicplayer app/src/main/res/mipmap-anydpi-v26
+          cp index.html app/src/main/assets/index.html
+          for d in mdpi hdpi xhdpi xxhdpi xxxhdpi; do mkdir -p app/src/main/res/mipmap-$d; cp icon.png app/src/main/res/mipmap-$d/ic_launcher.png; done
+          cp icon.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_fg.png
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+            <background android:drawable="@android:color/black"/>
+            <foreground android:drawable="@mipmap/ic_launcher_fg"/>
+          </adaptive-icon>
+          EOF
+          echo "android.useAndroidX=true" > gradle.properties
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "Kiss"
+          include(":app")
+          EOF
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+            id("com.android.application") version "8.5.2" apply false
+            id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+            id("com.android.application")
+            id("org.jetbrains.kotlin.android")
+          }
+          android {
+            namespace = "com.example.musicplayer"
+            compileSdk = 34
+            defaultConfig {
+              applicationId = "com.example.musicplayer"
+              minSdk = 26
+              targetSdk = 34
+              versionCode = 5
+              versionName = "0.5"
+            }
+            compileOptions {
+              sourceCompatibility = JavaVersion.VERSION_17
+              targetCompatibility = JavaVersion.VERSION_17
+            }
+            kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies { implementation("androidx.webkit:webkit:1.11.0") }
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
+            <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+            <application android:label="Kiss" android:icon="@mipmap/ic_launcher" android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+              <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTask" android:configChanges="orientation|screenSize|keyboardHidden">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+              </activity>
+              <service android:name=".PlayerService" android:exported="false" android:foregroundServiceType="mediaPlayback"/>
+            </application>
+          </manifest>
+          EOF
+          cat > app/src/main/java/com/example/musicplayer/PlayerService.kt <<'EOF'
+          package com.example.musicplayer
+          import android.app.*
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.graphics.*
+          import android.media.MediaMetadata
+          import android.media.session.MediaSession
+          import android.media.session.PlaybackState
+          import android.os.Build
+          import android.os.IBinder
+          import android.util.Base64
+          class PlayerService : Service() {
+            companion object { var onCmd: ((String) -> Unit)? = null }
+            private lateinit var ms: MediaSession
+            private var title = "Kiss"
+            private var artist = ""
+            private var playing = false
+            private var pos = 0L
+            private var dur = 0L
+            private var art: Bitmap? = null
+            override fun onBind(i: Intent?): IBinder? = null
+            override fun onCreate() {
+              super.onCreate()
+              getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel("p", "Плеер", NotificationManager.IMPORTANCE_LOW))
+              ms = MediaSession(this, "Kiss")
+              ms.setCallback(object : MediaSession.Callback() {
+                override fun onPlay() { onCmd?.invoke("play") }
+                override fun onPause() { onCmd?.invoke("pause") }
+                override fun onSkipToNext() { onCmd?.invoke("next") }
+                override fun onSkipToPrevious() { onCmd?.invoke("prev") }
+                override fun onSeekTo(p: Long) { onCmd?.invoke("seek:" + p) }
+              })
+              ms.isActive = true
+              art = defaultArt()
+            }
+            override fun onDestroy() { ms.release(); super.onDestroy() }
+            private fun defaultArt(): Bitmap {
+              val b = Bitmap.createBitmap(400, 400, Bitmap.Config.ARGB_8888)
+              val p = Paint(Paint.ANTI_ALIAS_FLAG)
+              p.shader = LinearGradient(0f, 0f, 400f, 400f, 0xFF34373F.toInt(), 0xFF15171C.toInt(), Shader.TileMode.CLAMP)
+              Canvas(b).drawRect(0f, 0f, 400f, 400f, p)
+              return b
+            }
+            override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
+              val a = i?.action
+              if (a == "prev" || a == "next") { onCmd?.invoke(a); return START_NOT_STICKY }
+              if (a == "toggle") { onCmd?.invoke(if (playing) "pause" else "play"); return START_NOT_STICKY }
+              if (a == "cover") {
+                val s = i?.getStringExtra("b") ?: ""
+                val bmp = if (s.isEmpty()) null else try { val b = Base64.decode(s, Base64.DEFAULT); BitmapFactory.decodeByteArray(b, 0, b.size) } catch (e: Exception) { null }
+                art = bmp ?: defaultArt()
+              } else {
+                title = i?.getStringExtra("t") ?: title
+                artist = i?.getStringExtra("a") ?: ""
+                playing = i?.getBooleanExtra("pl", false) ?: false
+                pos = i?.getLongExtra("pos", 0L) ?: 0L
+                dur = i?.getLongExtra("dur", 0L) ?: 0L
+              }
+              publish()
+              return START_NOT_STICKY
+            }
+            private fun publish() {
+              ms.setMetadata(MediaMetadata.Builder()
+                .putString(MediaMetadata.METADATA_KEY_TITLE, title)
+                .putString(MediaMetadata.METADATA_KEY_ARTIST, artist)
+                .putLong(MediaMetadata.METADATA_KEY_DURATION, dur)
+                .putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, art).build())
+              val acts = PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or PlaybackState.ACTION_PLAY_PAUSE or PlaybackState.ACTION_SKIP_TO_NEXT or PlaybackState.ACTION_SKIP_TO_PREVIOUS or PlaybackState.ACTION_SEEK_TO
+              ms.setPlaybackState(PlaybackState.Builder().setActions(acts)
+                .setState(if (playing) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED, pos, if (playing) 1f else 0f).build())
+              fun pi(x: String) = PendingIntent.getService(this, x.hashCode(), Intent(this, PlayerService::class.java).setAction(x), PendingIntent.FLAG_IMMUTABLE)
+              val n = Notification.Builder(this, "p")
+                .setSmallIcon(android.R.drawable.ic_media_play)
+                .setLargeIcon(art)
+                .setContentTitle(title)
+                .setContentText(artist)
+                .setVisibility(Notification.VISIBILITY_PUBLIC)
+                .setContentIntent(PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
+                .addAction(Notification.Action.Builder(android.R.drawable.ic_media_previous, "Назад", pi("prev")).build())
+                .addAction(Notification.Action.Builder(if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play, "Пауза", pi("toggle")).build())
+                .addAction(Notification.Action.Builder(android.R.drawable.ic_media_next, "Вперёд", pi("next")).build())
+                .setStyle(Notification.MediaStyle().setMediaSession(ms.sessionToken).setShowActionsInCompactView(0, 1, 2))
+                .setOngoing(playing)
+                .build()
+              if (Build.VERSION.SDK_INT >= 29) startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK) else startForeground(1, n)
+            }
+          }
+          EOF
+          cat > app/src/main/java/com/example/musicplayer/MainActivity.kt <<'EOF'
+          package com.example.musicplayer
+          import android.app.Activity
+          import android.content.Intent
+          import android.graphics.drawable.ColorDrawable
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.webkit.*
+          import androidx.webkit.WebViewAssetLoader
+          class Bridge(val a: Activity) {
+            @JavascriptInterface
+            fun update(t: String, s: String, p: Boolean, pos: Double, dur: Double) {
+              a.startForegroundService(Intent(a, PlayerService::class.java)
+                .putExtra("t", t).putExtra("a", s).putExtra("pl", p)
+                .putExtra("pos", pos.toLong()).putExtra("dur", dur.toLong()))
+            }
+            @JavascriptInterface
+            fun setCover(b: String) {
+              a.startForegroundService(Intent(a, PlayerService::class.java).setAction("cover").putExtra("b", b))
+            }
+          }
+          class MainActivity : Activity() {
+            private var cb: ValueCallback<Array<Uri>>? = null
+            override fun onCreate(s: Bundle?) {
+              super.onCreate(s)
+              window.setBackgroundDrawable(ColorDrawable(0xFF000000.toInt()))
+              window.statusBarColor = 0xFF000000.toInt()
+              window.navigationBarColor = 0xFF000000.toInt()
+              val w = WebView(this)
+              w.setBackgroundColor(0xFF000000.toInt())
+              setContentView(w)
+              if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 2)
+              val loader = WebViewAssetLoader.Builder()
+                .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this)).build()
+              w.settings.javaScriptEnabled = true
+              w.settings.domStorageEnabled = true
+              w.settings.mediaPlaybackRequiresUserGesture = false
+              w.addJavascriptInterface(Bridge(this), "Android")
+              w.webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(v: WebView, r: WebResourceRequest) =
+                  loader.shouldInterceptRequest(r.url)
+                override fun shouldOverrideUrlLoading(v: WebView, r: WebResourceRequest): Boolean {
+                  if (r.url.host == "appassets.androidplatform.net") return false
+                  startActivity(Intent(Intent.ACTION_VIEW, r.url))
+                  return true
+                }
+              }
+              w.webChromeClient = object : WebChromeClient() {
+                override fun onShowFileChooser(v: WebView, c: ValueCallback<Array<Uri>>, p: FileChooserParams): Boolean {
+                  cb?.onReceiveValue(null)
+                  cb = c
+                  startActivityForResult(p.createIntent(), 1)
+                  return true
+                }
+              }
+              PlayerService.onCmd = { c -> w.post { w.evaluateJavascript("nativeCmd('" + c + "')", null) } }
+              w.loadUrl("https://appassets.androidplatform.net/assets/index.html")
+            }
+            override fun onActivityResult(r: Int, c: Int, d: Intent?) {
+              if (r == 1) {
+                cb?.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(c, d))
+                cb = null
+              }
+            }
+          }
+          EOF
+      - name: Build
+        run: |
+          gradle assembleDebug --no-daemon
+          cp app/build/outputs/apk/debug/app-debug.apk Kiss.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Kiss
+          path: Kiss.apk
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "build-${{ github.run_number }}" Kiss.apk --target "${{ github.sha }}" --title "Kiss (build ${{ github.run_number }})" --notes "Automatic build. Download Kiss.apk below."

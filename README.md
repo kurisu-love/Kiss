@@ -8,10 +8,11 @@
 
 ## Features
 
-- Plays the MP3 files stored on your phone
+- Plays the MP3 files stored on your phone, and can add all audio from your phone in one tap (optional permission)
 - Covers (photo or GIF), titles and artists that you choose yourself
 - Playlists with their own covers
-- Liquid Glass interface
+- Two designs: Liquid Glass and Retro 2000s
+- English and Russian, chosen on first launch
 - 10-band equalizer with presets, plus slowed and speed-up modes
 - Sleep timer, crossfade and cover pulsing to the beat
 - System media notification and lock-screen controls

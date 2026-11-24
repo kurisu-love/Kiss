@@ -55,8 +55,8 @@ jobs:
               applicationId = "com.example.musicplayer"
               minSdk = 26
               targetSdk = 34
-              versionCode = 5
-              versionName = "0.5"
+              versionCode = 6
+              versionName = "0.6"
             }
             compileOptions {
               sourceCompatibility = JavaVersion.VERSION_17
@@ -71,6 +71,8 @@ jobs:
             <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
             <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
             <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+            <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>
+            <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
             <application android:label="Kiss" android:icon="@mipmap/ic_launcher" android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
               <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTask" android:configChanges="orientation|screenSize|keyboardHidden">
                 <intent-filter>
@@ -95,7 +97,10 @@ jobs:
           import android.os.IBinder
           import android.util.Base64
           class PlayerService : Service() {
-            companion object { var onCmd: ((String) -> Unit)? = null }
+            companion object {
+              var onCmd: ((String) -> Unit)? = null
+              var lang = "en"
+            }
             private lateinit var ms: MediaSession
             private var title = "Kiss"
             private var artist = ""
@@ -106,7 +111,7 @@ jobs:
             override fun onBind(i: Intent?): IBinder? = null
             override fun onCreate() {
               super.onCreate()
-              getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel("p", "Плеер", NotificationManager.IMPORTANCE_LOW))
+              getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel("p", "Playback", NotificationManager.IMPORTANCE_LOW))
               ms = MediaSession(this, "Kiss")
               ms.setCallback(object : MediaSession.Callback() {
                 override fun onPlay() { onCmd?.invoke("play") }
@@ -145,6 +150,7 @@ jobs:
               return START_NOT_STICKY
             }
             private fun publish() {
+              val ru = lang == "ru"
               ms.setMetadata(MediaMetadata.Builder()
                 .putString(MediaMetadata.METADATA_KEY_TITLE, title)
                 .putString(MediaMetadata.METADATA_KEY_ARTIST, artist)
@@ -161,9 +167,9 @@ jobs:
                 .setContentText(artist)
                 .setVisibility(Notification.VISIBILITY_PUBLIC)
                 .setContentIntent(PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
-                .addAction(Notification.Action.Builder(android.R.drawable.ic_media_previous, "Назад", pi("prev")).build())
-                .addAction(Notification.Action.Builder(if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play, "Пауза", pi("toggle")).build())
-                .addAction(Notification.Action.Builder(android.R.drawable.ic_media_next, "Вперёд", pi("next")).build())
+                .addAction(Notification.Action.Builder(android.R.drawable.ic_media_previous, if (ru) "Назад" else "Previous", pi("prev")).build())
+                .addAction(Notification.Action.Builder(if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play, if (ru) "Пауза" else "Pause", pi("toggle")).build())
+                .addAction(Notification.Action.Builder(android.R.drawable.ic_media_next, if (ru) "Вперёд" else "Next", pi("next")).build())
                 .setStyle(Notification.MediaStyle().setMediaSession(ms.sessionToken).setShowActionsInCompactView(0, 1, 2))
                 .setOngoing(playing)
                 .build()
@@ -174,14 +180,87 @@ jobs:
           cat > app/src/main/java/com/example/musicplayer/MainActivity.kt <<'EOF'
           package com.example.musicplayer
           import android.app.Activity
+          import android.content.ContentUris
           import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.graphics.Color
           import android.graphics.drawable.ColorDrawable
+          import android.media.MediaMetadataRetriever
           import android.net.Uri
           import android.os.Build
           import android.os.Bundle
+          import android.provider.MediaStore
+          import android.provider.Settings
+          import android.view.View
           import android.webkit.*
           import androidx.webkit.WebViewAssetLoader
-          class Bridge(val a: Activity) {
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.io.ByteArrayInputStream
+          import java.io.FilterInputStream
+          import java.io.InputStream
+          class Lim(i: InputStream, var n: Long) : FilterInputStream(i) {
+            override fun read(): Int {
+              if (n <= 0) return -1
+              val b = super.read()
+              if (b >= 0) n--
+              return b
+            }
+            override fun read(b: ByteArray, o: Int, l: Int): Int {
+              if (n <= 0) return -1
+              val r = super.read(b, o, minOf(l.toLong(), n).toInt())
+              if (r > 0) n -= r
+              return r
+            }
+          }
+          class Bridge(val a: MainActivity) {
+            private fun audioPerm() = if (Build.VERSION.SDK_INT >= 33) "android.permission.READ_MEDIA_AUDIO" else "android.permission.READ_EXTERNAL_STORAGE"
+            private fun has(p: String) = a.checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
+            @JavascriptInterface
+            fun hasAudio(): Boolean = has(audioPerm())
+            @JavascriptInterface
+            fun askNotif() {
+              a.runOnUiThread {
+                if (Build.VERSION.SDK_INT < 33 || has("android.permission.POST_NOTIFICATIONS")) a.js("permDone(2,true)")
+                else a.requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 2)
+              }
+            }
+            @JavascriptInterface
+            fun askAudio() {
+              a.runOnUiThread {
+                if (hasAudio()) a.js("permDone(3,true)") else a.requestPermissions(arrayOf(audioPerm()), 3)
+              }
+            }
+            @JavascriptInterface
+            fun openSettings() {
+              a.runOnUiThread { a.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + a.packageName))) }
+            }
+            @JavascriptInterface
+            fun setLang(l: String) { PlayerService.lang = l }
+            @JavascriptInterface
+            fun bar(top: String, bottom: String, light: Boolean) {
+              a.runOnUiThread {
+                a.window.statusBarColor = Color.parseColor(top)
+                a.window.navigationBarColor = Color.parseColor(bottom)
+                val d = a.window.decorView
+                var f = d.systemUiVisibility
+                f = if (light) f or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR else f and View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR.inv()
+                d.systemUiVisibility = f
+              }
+            }
+            @JavascriptInterface
+            fun scan(): String {
+              val arr = JSONArray()
+              try {
+                val proj = arrayOf(MediaStore.Audio.Media._ID, MediaStore.Audio.Media.TITLE, MediaStore.Audio.Media.ARTIST, MediaStore.Audio.Media.DURATION, MediaStore.Audio.Media.IS_MUSIC)
+                a.contentResolver.query(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, proj, null, null, MediaStore.Audio.Media.TITLE + " COLLATE NOCASE ASC")?.use { c ->
+                  while (c.moveToNext()) {
+                    arr.put(JSONObject().put("i", c.getLong(0)).put("t", c.getString(1) ?: "").put("a", c.getString(2) ?: "").put("d", c.getLong(3)).put("m", c.getInt(4)))
+                  }
+                }
+              } catch (e: Exception) {}
+              return arr.toString()
+            }
             @JavascriptInterface
             fun update(t: String, s: String, p: Boolean, pos: Double, dur: Double) {
               a.startForegroundService(Intent(a, PlayerService::class.java)
@@ -195,15 +274,56 @@ jobs:
           }
           class MainActivity : Activity() {
             private var cb: ValueCallback<Array<Uri>>? = null
+            lateinit var w: WebView
+            fun js(c: String) { w.evaluateJavascript(c, null) }
+            override fun onRequestPermissionsResult(code: Int, perms: Array<out String>, res: IntArray) {
+              super.onRequestPermissionsResult(code, perms, res)
+              val g = res.isNotEmpty() && res[0] == PackageManager.PERMISSION_GRANTED
+              js("permDone(" + code + "," + g + ")")
+            }
+            private fun notFound() = WebResourceResponse("text/plain", "utf-8", 404, "Not Found", HashMap<String, String>(), ByteArrayInputStream(ByteArray(0)))
+            private fun audioUri(r: WebResourceRequest): Uri =
+              ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, r.url.lastPathSegment!!.toLong())
+            private fun media(r: WebResourceRequest): WebResourceResponse? {
+              return try {
+                val uri = audioUri(r)
+                val afd = contentResolver.openAssetFileDescriptor(uri, "r") ?: return null
+                val len = if (afd.length >= 0) afd.length else afd.parcelFileDescriptor.statSize
+                val rg = r.requestHeaders["Range"] ?: r.requestHeaders["range"]
+                var s = 0L
+                var e = len - 1
+                if (rg != null && rg.startsWith("bytes=")) {
+                  val q = rg.substring(6).split("-")
+                  s = q[0].toLongOrNull() ?: 0L
+                  if (q.size > 1 && q[1].isNotEmpty()) e = q[1].toLong()
+                }
+                if (e >= len) e = len - 1
+                val ins = afd.createInputStream()
+                ins.skip(s)
+                val h = HashMap<String, String>()
+                h["Accept-Ranges"] = "bytes"
+                h["Content-Length"] = (e - s + 1).toString()
+                if (rg != null) h["Content-Range"] = "bytes " + s + "-" + e + "/" + len
+                WebResourceResponse(contentResolver.getType(uri) ?: "audio/mpeg", null, if (rg != null) 206 else 200, if (rg != null) "Partial Content" else "OK", h, Lim(ins, e - s + 1))
+              } catch (x: Exception) { null }
+            }
+            private fun art(r: WebResourceRequest): WebResourceResponse {
+              return try {
+                val m = MediaMetadataRetriever()
+                m.setDataSource(this, audioUri(r))
+                val b = m.embeddedPicture
+                m.release()
+                if (b == null) notFound() else WebResourceResponse(if (b.size > 4 && b[1].toInt() == 0x50) "image/png" else "image/jpeg", null, ByteArrayInputStream(b))
+              } catch (x: Exception) { notFound() }
+            }
             override fun onCreate(s: Bundle?) {
               super.onCreate(s)
               window.setBackgroundDrawable(ColorDrawable(0xFF000000.toInt()))
               window.statusBarColor = 0xFF000000.toInt()
               window.navigationBarColor = 0xFF000000.toInt()
-              val w = WebView(this)
+              w = WebView(this)
               w.setBackgroundColor(0xFF000000.toInt())
               setContentView(w)
-              if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 2)
               val loader = WebViewAssetLoader.Builder()
                 .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this)).build()
               w.settings.javaScriptEnabled = true
@@ -211,8 +331,12 @@ jobs:
               w.settings.mediaPlaybackRequiresUserGesture = false
               w.addJavascriptInterface(Bridge(this), "Android")
               w.webViewClient = object : WebViewClient() {
-                override fun shouldInterceptRequest(v: WebView, r: WebResourceRequest) =
-                  loader.shouldInterceptRequest(r.url)
+                override fun shouldInterceptRequest(v: WebView, r: WebResourceRequest): WebResourceResponse? {
+                  val p = r.url.path ?: ""
+                  if (p.startsWith("/media/")) return media(r)
+                  if (p.startsWith("/art/")) return art(r)
+                  return loader.shouldInterceptRequest(r.url)
+                }
                 override fun shouldOverrideUrlLoading(v: WebView, r: WebResourceRequest): Boolean {
                   if (r.url.host == "appassets.androidplatform.net") return false
                   startActivity(Intent(Intent.ACTION_VIEW, r.url))
